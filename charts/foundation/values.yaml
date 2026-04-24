@@ -1,0 +1,21 @@
+namespaces:
+  # Istio base + istiod (base, istiod)
+  - name: istio-system
+    labels:
+      app.kubernetes.io/part-of: cloud-platform
+      platform/component: istio
+
+  # # ArgoCD (argo-cd/)
+  # - name: argocd
+  #   labels:
+  #     app.kubernetes.io/part-of: cloud-platform
+  #     platform/component: argocd
+  #     istio-injection: enabled
+
+  # # Observability (kiali)
+  # - name: observability 
+  #   labels:
+  #     app.kubernetes.io/part-of: cloud-platform
+  #     platform/component: observability
+
+  # Platform Routing - deployed in istio-ingress (no extra namespace needed)

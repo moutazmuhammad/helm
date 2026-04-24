@@ -1,0 +1,159 @@
+## ----------------------------------------
+## Mesh Security
+## ----------------------------------------
+
+# To check mTLS is configured via PeerAuthentication:
+# kubectl get peerauthentication -A 
+# kubectl get peerauthentication -n argocd
+mesh-security:
+  meshSecurity:
+    mtls:
+      enabled: true
+      mode: STRICT
+      namespaces: 
+        - name: aib-auth
+        - name: aib-system
+        - name: aib-data
+        - name: aib-serving
+
+    authorizationPolicies:
+      - name: aib-auth
+        namespace: aib-auth
+        action: ALLOW
+        rules:
+          - from:
+              - namespaces:
+                  - aib-auth
+                  - istio-system
+
+    requestAuthentication: []
+    rateLimiting: []
+
+
+## ----------------------------------------
+## Mesh Networking
+## ----------------------------------------
+
+# To check Istio Gateway and Virtual Services :
+# kubectl get gateways.networking.istio.io -A
+# kubectl get virtualservices.networking.istio.io -A
+# kubectl get destinationrule.networking.istio.io -A
+
+mesh-networking:
+  meshNetworking:
+    domain: "dev.plus.aib.vodafone.com"
+    namespace: aib-auth
+    gateway:
+      enabled: true
+      name: platform-ingress-gateway
+      selector:
+        istio: ingressgateway
+      port:
+        number: 80
+        name: http
+        protocol: HTTP
+
+    services:
+      - name: nuclio-dashboard
+        subdomain: nuclio
+        serviceNamespace: aib-system
+        port: 8070
+        timeout: 300s
+        retries:
+          attempts: 3
+          perTryTimeout: 120s
+        trafficPolicy:
+          tls:
+            mode: ISTIO_MUTUAL
+
+      - name: mlrun-ui
+        subdomain: mlrun
+        serviceNamespace: aib-system
+        port: 80
+
+        routes:
+          - pathPrefix: /mlrun/api
+            host: mlrun-api.aib-system.svc.cluster.local
+            port: 8080
+            rewrite: /api
+
+          - pathPrefix: /mlrun
+            host: mlrun-ui.aib-system.svc.cluster.local
+            port: 80
+            rewrite: /
+
+          - pathPrefix: /api
+            host: mlrun-api.aib-system.svc.cluster.local
+            port: 8080
+
+          - pathPrefix: /
+            host: mlrun-ui.aib-system.svc.cluster.local
+            port: 80
+
+        trafficPolicy:
+          tls:
+            mode: ISTIO_MUTUAL
+
+      - name: minio-console
+        subdomain: minio
+        serviceNamespace: aib-data
+        port: 9001
+        trafficPolicy:
+          tls:
+            mode: ISTIO_MUTUAL
+
+
+## ----------------------------------------
+## Mesh Egress
+## ----------------------------------------
+
+mesh-egress:
+  meshEgress:
+    namespace: aib-auth
+    gateway:
+      enabled: false
+      name: platform-egress-gateway
+      serviceNamespace: istio-system
+      selector:
+        istio: egressgateway
+
+    services:
+      - name: gar-europe-west1
+        enabled: true
+        namespace: aib-system
+        host: europe-west1-docker.pkg.dev
+        port: 443
+        resolution: DNS
+        location: MESH_EXTERNAL
+
+      - name: gcs
+        enabled: true
+        namespace: aib-system
+        host: storage.googleapis.com
+        port: 443
+        resolution: DNS
+        location: MESH_EXTERNAL
+      
+      # - name: gcp-oauth
+      #   enabled: true
+      #   namespace: aib-system
+      #   host: oauth2.googleapis.com
+      #   port: 443
+      #   resolution: DNS
+      #   location: MESH_EXTERNAL
+      
+      # - name: gke-metadata
+      #   enabled: true
+      #   namespace: aib-system
+      #   host: metadata.google.internal
+      #   port: 80
+      #   resolution: DNS
+      #   location: MESH_EXTERNAL
+      
+      - name: nuget-api
+        enabled: true
+        namespace: aib-system
+        host: api.nuget.org
+        port: 443
+        resolution: DNS
+        location: MESH_EXTERNAL

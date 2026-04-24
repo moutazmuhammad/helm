@@ -1,0 +1,437 @@
+global:
+  registry:
+    url: "europe-west1-docker.pkg.dev/vf-grp-aibplus-dev-mlproduct/nuclio-functions-registry"
+    secretName: "nuclio-gar-push"
+  
+  infrastructure:
+    kind: standalone                   # cloud-agnostic, no provider assumptions
+    provider: ~                        # Set to null since we target any provider.
+    inboundCidrs: ~                    # Set to null since we target any provider
+    loadBalancerName: ~                # Not used with ClusterIP services
+    aws:                   
+      bucketName: mlrun                # Even with non-AWS setups, this value is used because MinIO is S3-compatible.
+      s3NonAnonymous: false            # Use this only with real AWS S3 and IAM-based authentication.
+      domainNameCertificate: ~         # Only used when infrastructure.kind is "aws". Not relevant here.
+
+
+# =============================================================================
+# Nuclio - Serverless Functions
+# =============================================================================
+
+nuclio:
+  externalHostAddress: nuclio.dev.plus.aib.vodafone.com
+  fullnameOverride: nuclio
+  registry:
+    dependantImageRegistryURL: "europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images"     
+  controller:
+    namespace: ""
+    enabled: true
+    # Leader-elected — keep at 1. Scaling beyond 1 does not add HA.
+    replicas: 1
+
+    image:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/nuclio-controller
+      tag: 1.15.9-amd64
+      pullPolicy: IfNotPresent
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  dashboard:
+    enabled: true
+    # 2 replicas for HA in dev. PDB ships via scripts/pdbs.yaml.
+    replicas: 1
+    service:
+      type: ClusterIP 
+    containerBuilderKind: kaniko
+
+    image:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/nuclio-dashboard
+      tag: 1.15.9-amd64
+      pullPolicy: IfNotPresent
+    
+    kaniko:
+      image:
+        repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/kaniko-executor
+        tag: v1.23.2
+
+      initContainerImage:
+        busybox:
+          repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/busybox
+          tag: stable
+
+        awscli:
+          repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/aws-cli
+          tag: 2.17.16
+
+    ingress:
+      enabled: false
+
+    # Run dashboard as non-root
+    securityContext:                   
+      runAsNonRoot: true
+      runAsUser: 1000
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    
+    rbac:
+      create: true
+      crdAccessMode: cluster
+    
+    # Install Nuclio CRDs (NuclioFunction, NuclioProject, NuclioFunctionEvent)
+    crd:                               
+      create: true
+
+    # # Target namespace where Nuclio deploys serverless function pods.
+    # functionNamespace: aib-serving 
+
+    platform:
+      projectsLeader:                  # Who is the source of truth for project definitions.
+        kind: mlrun                    # "mlrun" (MLRun manages projects, Nuclio follows),
+        synchronizationInterval: 10m   # How often Nuclio syncs project state from MLRun.
+        apiAddress: http://mlrun-api-chief:8080/api
+
+    autoscaler:
+      image:
+        repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/nuclio-autoscaler
+        tag: 1.15.9-amd64
+    dlx:
+      image:
+        repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/nuclio-dlx
+        tag: 1.15.9-amd64
+# =============================================================================
+# MLRun Core
+# =============================================================================
+mlrun:
+  externalHostAddress: mlrun.dev.plus.aib.vodafone.com
+  fullnameOverride: mlrun
+  enabled: true
+
+  # Default resource limits/requests applied to MLRun-submitted function pods (training jobs, serving functions, etc.)
+  defaultFunctionPodResources:
+    limits:
+      cpu: "2"
+      memory: "20Gi"
+    requests:
+      cpu: "25m"
+      memory: "1Mi"
+
+  # Options: "filesystem" (uses S3/MinIO via S3 protocol), "s3" (direct AWS S3)
+  storage: filesystem
+  storageAutoMountParams: ~
+
+  # Credentials come from the "minio-credentials" Kubernetes Secret
+  secrets:
+    s3:
+      accessKey: ""
+      secretKey: ""
+  #   kubectl create secret generic minio-credentials \
+  #     --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
+  #     --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
+  #     --namespace aib-system
+
+  # MLRun's Nuclio integration mode.
+  nuclio:
+    mode: enabled
+    uiURL: https://nuclio.dev.plus.aib.vodafone.com
+    apiURL: http://nuclio-dashboard.aib-system.svc.cluster.local:8070
+
+  rbac:
+    create: true
+
+  api:
+    extraEnv:
+      - name: MLRUN_FUNCTION_CATALOG_URL
+        value: "https://your-custom-marketplace.com"
+      - name: MLRUN_FUNCTION_CATALOG_PATH
+        value: "/your-org/functions/main"
+
+    ingress:
+      enabled: false
+    fullnameOverride: mlrun-api
+    service:
+      type: ClusterIP
+
+    # Leader (writes state). Keep at 1; MLRun's HTTPDB is single-writer.
+    chief:
+      minReplicas: 1
+    
+    worker:
+      minReplicas: 0
+
+    image:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mlrun-api
+      tag: 1.10.0
+      pullPolicy: IfNotPresent
+
+    # Sidecar that streams function pod logs to the API.
+    sidecars:
+      logCollector:
+        enabled: true
+        image:
+          repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mlrun-log-collector
+          tag: 1.10.0
+          pullPolicy: IfNotPresent
+
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    
+    # PVC used by MLRun API for local file storage (logs, temp files).
+    volumes:
+      storageOverride:
+        persistentVolumeClaim:
+          claimName: mlrun-api-pvc
+
+    # Enable persistent storage for the MLRun API.
+    # When false, data is lost on pod restart.
+    persistence:
+      enabled: true
+      # Use a pre-existing PVC instead of creating one. Leave empty to auto-create.
+      existingClaim:
+      storageClass:
+      accessMode: "ReadWriteOnce"
+      size: "8Gi"
+      # annotations:
+      #   helm.sh/resource-policy: "keep"
+    
+    envFrom:
+      - configMapRef:
+          name: mlrun-common-env
+      - configMapRef:
+          name: mlrun-pipelines-config
+          optional: true
+      - configMapRef:
+          name: mlrun-spark-config
+          optional: true
+      - configMapRef:
+          name: mlrun-override-env
+          optional: true
+      - secretRef:
+          name: minio-credentials
+
+    extraEnvKeyValue:
+      S3_ENDPOINT_URL: "http://minio.aib-data.svc.cluster.local:9000"
+      AWS_ENDPOINT_URL_S3: "http://minio.aib-data.svc.cluster.local:9000"
+      AWS_S3_ENDPOINT_URL: "http://minio.aib-data.svc.cluster.local:9000"
+      # -----------------------------------------------------------------------
+      # MLRun Function Hub (marketplace)
+      # -----------------------------------------------------------------------
+      # Default upstream is https://mlrun.github.io/marketplace — unreachable
+      # from this cluster (no egress to github.io). Pick ONE of the two blocks
+      # below and uncomment it.
+      #
+      # --- Option A: Disable the default hub entirely -------------------------
+      # Prevents MLRun from auto-registering the github.io source on startup.
+      # Use this if your users don't need the public function catalog.
+      #
+      # MLRUN_HUB__DEFAULT_SOURCE__CREATE: "false"
+      # MLRUN_HUB__DEFAULT_SOURCE__URL: ""
+      #
+      # --- Option B: Mirror the hub on an internal GitHub ---------------------
+      # Mirror mlrun/functions (the catalog repo) to an internal GitHub and
+      # point MLRun at the Pages/raw URL. The URL must serve the same layout
+      # as mlrun.github.io/marketplace (i.e. /functions/<channel>/catalog.json).
+      # Adjust org/repo/channel to match your mirror.
+      #
+      # MLRUN_HUB__DEFAULT_SOURCE__URL: "https://github.vodafone.com/pages/<org>/mlrun-marketplace"
+      # MLRUN_HUB__DEFAULT_SOURCE__CHANNEL: "master"
+
+    extraPersistentVolumeMounts: ~
+
+  ui:
+    fullnameOverride: mlrun-ui
+    # 2 replicas for HA in dev. PDB ships via scripts/pdbs.yaml.
+    replicaCount: 1
+
+    image:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mlrun-ui
+      tag: 1.10.0
+      pullPolicy: IfNotPresent
+
+    ingress:
+      # Ingress for MLRun UI. Same reasoning as api.ingress.
+      enabled: false
+    service:
+      # Service type for MLRun UI.
+      # Options: same as api.service.type above.
+      type: ClusterIP
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      runAsNonRoot: true
+    podSecurityContext:
+      runAsNonRoot: true
+    # Resource limits for the MLRun UI pod.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+
+  db:
+    enabled: false
+    name: db
+    existingDsnSecret: true
+    fullnameOverride: mlrun-db
+    persistence:
+      enabled: false
+
+  httpDB:
+    dbType: mysql
+    dirPath: "/mlrun/db"
+
+    # Points to the external mlrun-db service (bitnami mysql release).
+    # The password must match the mysql-credentials secret and is supplied at
+    # install time, e.g.:
+    #   --set-string mlrun.httpDB.dsn="mysql+pymysql://root:<password>@mlrun-db:3306/mlrun"
+    dsn: mysql+pymysql://root@mlrun-db:3306/mlrun
+    oldDsn: sqlite:////mlrun/db/mlrun.db?check_same_thread=false
+
+  modelMonitoring:
+    dsn:
+
+  ce:
+    mode: full
+
+  
+# =============================================================================
+# Jupyter Notebook
+# =============================================================================
+jupyterNotebook:
+  enabled: false
+  serviceAccount:
+    create: false
+  persistence:
+    enabled: false
+
+
+# =============================================================================
+# S3-Compatible Object Store (MinIO subchart DISABLED)
+#
+# This chart does NOT create a MinIO instance. All components are configured
+# to use a pre-existing S3-compatible store in the aib-data namespace.
+# Compatible backends include:
+#   - MinIO (deployed via a separate Helm release)
+#   - An existing AI Store / object store installed in aib-data
+#   - Any other S3-compatible store reachable via cross-namespace DNS
+#
+# Requirements for the external object store:
+#   - Accessible at <externalHost>:<service.port> from aib-system
+#   - Supports the S3 protocol (PUT/GET/LIST/DELETE)
+#   - Has a bucket named "mlrun" (or matching global.infrastructure.aws.bucketName)
+#   - Credentials available as a Kubernetes Secret in aib-system (see below)
+#
+# SECRETS: Object store credentials are NOT stored in values.yaml.
+# Create them as Kubernetes Secrets before deploying:
+#
+#   kubectl create secret generic minio-credentials \
+#     --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
+#     --namespace aib-system
+#
+#   kubectl create secret generic mlpipeline-minio-artifact \
+#     --from-literal=accesskey=<access-key> \
+#     --from-literal=secretkey=<secret-key> \
+#     --namespace aib-system
+#
+# Both are referenced by the chart via existingSecret (no credentials rendered
+# into the chart from values.yaml).
+# =============================================================================
+minio:
+  enabled: false
+
+  # Cross-namespace DNS endpoint for the external object store in aib-data.
+  # Change: Used by _helpers.tpl to resolve the S3 endpoint for MLRun, Jupyter,
+  # Pipelines, and Argo. Supports any S3-compatible store (MinIO, AI Store, etc).
+  externalHost: minio.aib-data.svc.cluster.local
+  existingSecret: "minio-credentials"
+
+  # Unused when existingSecret is set. 
+  credentialsSecretName: ""
+  rootUser: ""
+  rootPassword: ""
+
+  service:
+    port: 9000
+
+
+# =============================================================================
+
+pipelines:
+  enabled: false
+  crd:
+    enable: false
+  priority_class:
+    enable: false
+
+spark-operator:
+  enabled: false
+  image:
+    repository: vf-grp-aib-dev-mirror/aib-plus-images/spark-operator
+    tag: "2.1.0"
+
+mpi-operator:
+  deployment:
+    create: false
+
+  image:
+    deployment:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mpi-operator
+      tag: v0.2.3-igz
+    kubectlDelivery:
+      repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mpi-kubectl-delivery
+      tag: v0.2.3
+
+# =============================================================================
+# Kube Prometheus Stack - DISABLED
+# =============================================================================
+kube-prometheus-stack:
+  enabled: false
+  grafana:
+    enabled: false
+    service:
+      nodePort: 0
+
+# =============================================================================
+# TDengine
+#
+# Time-series database used by MLRun for model monitoring metrics storage.
+# Disabled here. Enable if you need MLRun's built-in model monitoring with
+# time-series data (prediction drift, data quality metrics).
+# Alternative: use an external time-series DB and configure MLRun to connect to it.
+# =============================================================================
+tdengine:
+  enabled: false
+
+# =============================================================================
+# Kafka - DISABLED (will be installed separately in aib-data namespace)
+#
+# Event streaming platform used by MLRun for:
+# - Real-time model monitoring (streaming prediction data)
+# - Event-driven function triggers
+#
+# Disabled here because Kafka is deployed in aib-data namespace with its own
+# MLRun connects to Kafka via configuration at runtime (not via chart values).
+# =============================================================================
+kafka:
+  enabled: false

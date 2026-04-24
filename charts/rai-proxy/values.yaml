@@ -1,0 +1,17 @@
+name: rai-proxy
+
+namespace: responsible-ai
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+  protocol: TCP
+
+environment: dev
+
+image:
+  repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/promptinj-aibplus
+  tag: v1.5
+
+replicaCount: 1

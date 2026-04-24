@@ -1,0 +1,96 @@
+############### required user input for oauth2-proxy:
+# export BASE_DOMAIN="34.54.147.73.sslip.io"
+# secret (oauth2-proxy-secret) in namespace (aib-auth) with fields:
+#   OAUTH2_PROXY_CLIENT_ID `STRING`
+#   OAUTH2_PROXY_CLIENT_SECRET `openssl rand -hex 32`
+#   OAUTH2_PROXY_COOKIE_SECRET `openssl rand -base64 32`
+
+
+envFrom:
+  - secretRef:
+      name: oauth2-proxy-secret
+
+config:
+  requiredSecretKeys: null
+  configFile: null
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchLabels:
+          app: oauth2-proxy
+      topologyKey: kubernetes.io/hostname
+
+replicaCount: 2
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 1
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+
+extraEnv:
+  - name: OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY
+    value: "true" #temp
+  - name: OAUTH2_PROXY_PROVIDER
+    value: "oidc"
+  - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+    value: "https://dex.34.54.147.73.sslip.io"
+  - name: OAUTH2_PROXY_SCOPE
+    value: "openid email profile groups"
+  - name: OAUTH2_PROXY_REDIRECT_URL
+    value: "https://auth.34.54.147.73.sslip.io/oauth2/callback"
+  - name: OAUTH2_PROXY_HTTP_ADDRESS
+    value: "0.0.0.0:4180"
+  - name: OAUTH2_PROXY_UPSTREAMS
+    value: "static://200"
+  - name: OAUTH2_PROXY_REVERSE_PROXY
+    value: "true"
+  - name: OAUTH2_PROXY_COOKIE_DOMAINS
+    value: ".34.54.147.73.sslip.io"
+  - name: OAUTH2_PROXY_WHITELIST_DOMAINS
+    value: ".34.54.147.73.sslip.io"
+  - name: OAUTH2_PROXY_COOKIE_SECURE
+    value: "true"
+  - name: OAUTH2_PROXY_COOKIE_HTTPONLY
+    value: "true"
+  - name: OAUTH2_PROXY_COOKIE_SAMESITE
+    value: "lax"
+  - name: OAUTH2_PROXY_COOKIE_EXPIRE
+    value: "4h"
+  - name: OAUTH2_PROXY_COOKIE_REFRESH
+    value: "30m"
+  - name: OAUTH2_PROXY_EMAIL_DOMAINS
+    value: "*"
+  - name: OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL
+    value: "true"
+  - name: OAUTH2_PROXY_SET_AUTHORIZATION_HEADER
+    value: "true"
+  - name: OAUTH2_PROXY_SET_XAUTHREQUEST
+    value: "true"
+  - name: OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER
+    value: "true"
+  - name: OAUTH2_PROXY_PASS_USER_HEADERS
+    value: "true"
+  - name: OAUTH2_PROXY_OIDC_EMAIL_CLAIM
+    value: "email"
+  - name: OAUTH2_PROXY_OIDC_GROUPS_CLAIM
+    value: "groups"
+  - name: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
+    value: "true"
+  - name: OAUTH2_PROXY_SKIP_AUTH_REGEX
+    value: "^/health$, ^/ready$, ^/metrics$"

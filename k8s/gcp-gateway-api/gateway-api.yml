@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external-gateway-api
+  namespace: gateway
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+  - type: NamedAddress
+    value: gke-aib-plus-ml-product-ip  # change it
+  listeners:
+
+  - name: https
+    protocol: HTTPS
+    port: 443
+    hostname: "*.34.54.147.73.sslip.io" # change it
+    tls:
+      mode: Terminate
+      certificateRefs: # created the secret and stored files locally for now until the external secrets component is implemented
+      - kind: Secret
+        name: gateway-tls
+    allowedRoutes:
+      namespaces:
+        from: All
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: istio-route
+  namespace: gateway
+spec:
+  parentRefs:
+  - name: external-gateway-api
+    sectionName: https
+  hostnames:
+  - "*.34.54.147.73.sslip.io" # change it base on cluster
+  rules:
+  - backendRefs:
+    - name: istio-ingressgateway
+      namespace: istio-system
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway
+  namespace: istio-system
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: gateway
+  to:
+  - group: ""
+    kind: Service
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: istio-ingressgateway-hc
+  namespace: istio-system
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: istio-ingressgateway
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 15021
+        requestPath: /healthz/ready

@@ -1,0 +1,40 @@
+# common values
+name: gke-gateway-api
+namespace: gateway
+
+# For ML Product cluster
+addressName: gke-aib-plus-ml-product-ip
+listener:
+  name: https
+  port: 443
+  protocol: HTTPS
+  tls:
+    certificates:
+      # The secret name on GCP must match the hostname,
+      # BUT replace dots (.) with dashes (-)
+      # AND replace asterisk (*) with string ("wildcard")
+      # - *.${BASE_DOMAIN} 
+      - kubeflow.${BASE_DOMAIN}
+      - mlrun.${BASE_DOMAIN}
+      - alert.${BASE_DOMAIN}
+      - minio.${BASE_DOMAIN}
+      - s3.${BASE_DOMAIN}
+      - mlflow.${BASE_DOMAIN}
+      - nuclio.${BASE_DOMAIN}
+      - auth.${BASE_DOMAIN}
+      - dex.${BASE_DOMAIN}
+      - inference.${BASE_DOMAIN}
+      - llm.${BASE_DOMAIN}
+      - features.${BASE_DOMAIN}
+      - prometheus.${BASE_DOMAIN}
+      - grafana.${BASE_DOMAIN}
+
+# For Shared Services cluster
+# addressName: gke-aib-plus-shared-services-ip
+# listener:
+#   name: https
+#   port: 443
+#   protocol: HTTPS
+#   tls:
+#     certificates:
+#       - argocd.${BASE_DOMAIN}
