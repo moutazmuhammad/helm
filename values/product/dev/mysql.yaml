@@ -93,12 +93,24 @@ initdbScripts:
         ROOT_PW=$(cat /opt/bitnami/mysql/secrets/mysql-root-password)
     fi
     SW_PW=$(cat /seaweedfs-init/mariadb-password)
+    # Includes the `filemeta` table that the SeaweedFS filer expects to find.
+    # The filer (chart 4.21) does NOT auto-create this schema — it errors out
+    # with "Table 'seaweedfs.filemeta' doesn't exist" if missing. Schema
+    # matches the upstream MySQL store definition.
     /opt/bitnami/mysql/bin/mysql -uroot -p"$ROOT_PW" <<EOF
     CREATE DATABASE IF NOT EXISTS seaweedfs DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
     CREATE USER IF NOT EXISTS 'seaweedfs'@'%' IDENTIFIED BY '${SW_PW}';
     ALTER USER 'seaweedfs'@'%' IDENTIFIED BY '${SW_PW}';
     GRANT ALL PRIVILEGES ON seaweedfs.* TO 'seaweedfs'@'%';
     FLUSH PRIVILEGES;
+    USE seaweedfs;
+    CREATE TABLE IF NOT EXISTS filemeta (
+      \`dirhash\`   BIGINT       NOT NULL COMMENT 'first 64 bits of MD5 hash value of directory field',
+      \`name\`      VARCHAR(766) NOT NULL COMMENT 'directory or file name',
+      \`directory\` TEXT         NOT NULL COMMENT 'full path to parent directory',
+      \`meta\`      LONGBLOB,
+      PRIMARY KEY (\`dirhash\`, \`name\`)
+    ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
     EOF
 
 
