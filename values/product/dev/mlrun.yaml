@@ -324,11 +324,13 @@ mlrun:
     dbType: mysql
     dirPath: "/mlrun/db"
 
-    # Points to the external mlrun-db service (bitnami mysql release) running
-    # in the aib-data namespace. The password must match the mysql-credentials
-    # secret and is supplied at install time, e.g.:
-    #   --set-string mlrun.httpDB.dsn="mysql+pymysql://root:<password>@mlrun-db.aib-data.svc.cluster.local:3306/mlrun"
-    dsn: mysql+pymysql://root@mlrun-db.aib-data.svc.cluster.local:3306/mlrun
+    # Points to the external mlrun-db-primary service (bitnami/mysql with
+    # architecture: replication exposes the writable endpoint as
+    # <fullname>-primary, not <fullname>). Password must match the
+    # mysql-credentials Secret; the real DSN ships from the mlrun-db Secret
+    # (db.existingDsnSecret: true) so this value is just a fallback example.
+    #   --set-string mlrun.httpDB.dsn="mysql+pymysql://root:<password>@mlrun-db-primary.aib-data.svc.cluster.local:3306/mlrun"
+    dsn: mysql+pymysql://root@mlrun-db-primary.aib-data.svc.cluster.local:3306/mlrun
     oldDsn: sqlite:////mlrun/db/mlrun.db?check_same_thread=false
 
   modelMonitoring:

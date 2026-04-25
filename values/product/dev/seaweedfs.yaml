@@ -236,7 +236,10 @@ filer:
   extraEnvironmentVars:
     WEED_LEVELDB2_ENABLED: "false"
     WEED_MYSQL_ENABLED: "true"
-    WEED_MYSQL_HOSTNAME: "mlrun-db.aib-data.svc.cluster.local"
+    # bitnami/mysql with architecture: replication exposes the primary
+    # (writable) endpoint at <fullname>-primary, NOT <fullname>. There is no
+    # `mlrun-db` Service, only `mlrun-db-primary` and `mlrun-db-secondary`.
+    WEED_MYSQL_HOSTNAME: "mlrun-db-primary.aib-data.svc.cluster.local"
     WEED_MYSQL_PORT: "3306"
     WEED_MYSQL_USERNAME: "seaweedfs"
     WEED_MYSQL_DATABASE: "seaweedfs"
