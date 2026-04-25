@@ -18,7 +18,16 @@ data:
   {{- $legacyName := printf "%s-%s" (include "seaweedfs.name" .) "security-config" }}
   {{- $existing = lookup "v1" "ConfigMap" .Release.Namespace $legacyName }}
   {{- end }}
-  {{- $securityConfig := fromToml (dig "data" "security.toml" "" $existing) }}
+  {{- /* upstream uses `fromToml` here to read existing security.toml and
+         preserve the JWT keys across upgrades; Helm 4 dropped that function
+         from the template set, so we substitute an empty map. The whole
+         file is gated by global.seaweedfs.enableSecurity: true, which we
+         leave OFF — so this branch is never evaluated and the
+         randAlphaNum default in each `dig ... key` call below is the
+         effective value. If you ever turn enableSecurity on, replace this
+         with `fromYaml` (also empty-dict-safe) or downgrade to Helm 3.13+. */}}
+  {{- $securityConfig := dict }}
+  {{- $_ := $existing }}
   security.toml: |-
     # this file is read by master, volume server, and filer
 
