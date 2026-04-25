@@ -151,20 +151,9 @@ mlrun:
   # legacy `secrets.s3.accessKey/secretKey` knobs only apply when
   # `storage: s3`, so they are intentionally omitted here.
   #
-  # After the SeaweedFS chart installs, mint the Secret in aib-system:
-  #
-  #   ADMIN_KEY=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
-  #     -o jsonpath='{.data.admin_access_key_id}' | base64 -d)
-  #   ADMIN_SECRET=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
-  #     -o jsonpath='{.data.admin_secret_access_key}' | base64 -d)
-  #   kubectl create secret generic minio-credentials \
-  #     --from-literal=AWS_ACCESS_KEY_ID=$ADMIN_KEY \
-  #     --from-literal=AWS_SECRET_ACCESS_KEY=$ADMIN_SECRET \
-  #     --namespace aib-system
-  #   kubectl create secret generic mlpipeline-minio-artifact \
-  #     --from-literal=accesskey=$ADMIN_KEY \
-  #     --from-literal=secretkey=$ADMIN_SECRET \
-  #     --namespace aib-system
+  # `minio-credentials` is declared directly in scripts/secrets.yaml and
+  # must carry the same accessKey/secretKey as the `anvAdmin` identity in
+  # `seaweedfs-s3-config` (aib-data). No runtime derivation.
 
   # MLRun's Nuclio integration mode.
   nuclio:

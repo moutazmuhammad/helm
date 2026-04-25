@@ -75,24 +75,9 @@ helm upgrade --install seaweedfs charts/seaweedfs \
   -f values/product/dev/seaweedfs.yaml \
   --wait --timeout 15m
 ########################
-# Sync the SeaweedFS S3 admin keys into aib-system as the
-# minio-credentials / mlpipeline-minio-artifact Secrets MLRun expects.
-ADMIN_KEY=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
-  -o jsonpath='{.data.admin_access_key_id}' | base64 -d)
-ADMIN_SECRET=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
-  -o jsonpath='{.data.admin_secret_access_key}' | base64 -d)
-
-kubectl create secret generic minio-credentials \
-  --from-literal=AWS_ACCESS_KEY_ID="$ADMIN_KEY" \
-  --from-literal=AWS_SECRET_ACCESS_KEY="$ADMIN_SECRET" \
-  --namespace aib-system \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create secret generic mlpipeline-minio-artifact \
-  --from-literal=accesskey="$ADMIN_KEY" \
-  --from-literal=secretkey="$ADMIN_SECRET" \
-  --namespace aib-system \
-  --dry-run=client -o yaml | kubectl apply -f -
+# (minio-credentials and mlpipeline-minio-artifact are declared directly in
+# scripts/secrets.yaml — no post-install derivation from seaweedfs-s3-secret.
+# This keeps the deploy fully declarative and GitOps-friendly.)
 ########################
 # MLRUN
 helm upgrade --install mlrun charts/mlrun-ce \

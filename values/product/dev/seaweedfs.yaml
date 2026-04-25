@@ -281,16 +281,16 @@ s3:
   httpsPort: 0
   metricsPort: 9327
 
-  # Auth on. The chart auto-generates an admin and a read-only key pair on
-  # first install and stores them in the `seaweedfs-s3-secret` Secret in this
-  # namespace; they are preserved across upgrades via the
-  # helm.sh/resource-policy: keep annotation on the Secret.
+  # Auth on, with user-supplied credentials (no post-install derivation).
+  # The chart mounts `seaweedfs-s3-config` at /etc/sw and passes it to
+  # `weed s3 -config=/etc/sw/seaweedfs_s3_config`; it does NOT auto-generate
+  # its own `<fullname>-s3-secret` because existingConfigSecret is set.
   #
-  # To explicitly pin the keys instead of letting them auto-generate, set:
-  #   credentials:
-  #     admin: { accessKey: "...", secretKey: "..." }
-  #     read:  { accessKey: "...", secretKey: "..." }
+  # The same admin accessKey/secretKey declared in seaweedfs-s3-config are
+  # also declared in scripts/secrets.yaml as `minio-credentials` (aib-system)
+  # and `mlpipeline-minio-artifact` (aib-system) — keep all three in sync.
   enableAuth: true
+  existingConfigSecret: seaweedfs-s3-config
 
   # Pre-create the buckets MLRun, Nuclio and pipelines expect. The names
   # match the global.infrastructure.aws.bucketName / pipelines defaults.
