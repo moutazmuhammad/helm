@@ -115,18 +115,28 @@ mesh-networking:
           tls:
             mode: ISTIO_MUTUAL
 
-      # - name: seaweedfs-master
-      #   subdomain: seaweedfs
-      #   serviceNamespace: aib-data
-      #   port: 9333
-      #   trafficPolicy:
-      #     tls:
-      #       mode: ISTIO_MUTUAL
-
       - name: seaweedfs-filer
         subdomain: seaweedfs-filer
         serviceNamespace: aib-data
         port: 8888
+        trafficPolicy:
+          tls:
+            mode: ISTIO_MUTUAL
+            
+      # SeaweedFS Admin dashboard — port 23646. The single operator UI:
+      # cluster status, volume topology, bucket management, and S3 IAM
+      # (access-key generation). Login is gated by the
+      # seaweedfs-admin-credentials Secret in aib-data.
+      #
+      # The legacy master web UI (port 9333) and filer UI (port 8888) are NOT
+      # exposed — the admin dashboard supersedes the master UI, and the filer
+      # UI was a directory browser used mainly for ad-hoc file debugging
+      # (use `aws s3` against the s3 endpoint, or `kubectl port-forward
+      # svc/seaweedfs-filer 8888:8888` if you ever need it).
+      - name: seaweedfs-admin
+        subdomain: seaweedfs-admin
+        serviceNamespace: aib-data
+        port: 23646
         trafficPolicy:
           tls:
             mode: ISTIO_MUTUAL

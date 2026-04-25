@@ -289,18 +289,23 @@ s3:
   # `weed s3 -config=/etc/sw/seaweedfs_s3_config`; it does NOT auto-generate
   # its own `<fullname>-s3-secret` because existingConfigSecret is set.
   #
-  # The same admin accessKey/secretKey declared in seaweedfs-s3-config are
-  # also declared in scripts/secrets.yaml as `minio-credentials` (aib-system)
-  # and `mlpipeline-minio-artifact` (aib-system) — keep all three in sync.
+  # seaweedfs-s3-config carries two identities (see scripts/secrets.yaml):
+  #   - anvAdmin       — full Admin/Read/Write, retained for ops (mc, aws cli).
+  #   - mlrunAppWriter — Read/Write/List/Tagging scoped to bucket `mlrun`.
+  #                      MLRun's `minio-credentials` Secret (aib-system) MUST
+  #                      carry this same key pair.
   enableAuth: true
   existingConfigSecret: seaweedfs-s3-config
 
-  # Pre-create the buckets MLRun, Nuclio and pipelines expect. The names
-  # match the global.infrastructure.aws.bucketName / pipelines defaults.
+  # Pre-create the bucket MLRun writes artifacts to. SeaweedFS S3 returns
+  # NoSuchBucket on PUT to a missing bucket and MLRun's s3fs client does
+  # not auto-create. Other potential buckets are intentionally omitted:
+  #   - `mlpipeline` would be needed only with pipelines.enabled: true
+  #     (Kubeflow Pipelines / Argo workflow artifacts) — disabled here.
+  #   - `models`     would be needed only if you use MLRun's models:// URI
+  #     scheme for the model registry — enable later when you serve models.
   createBuckets:
     - name: mlrun
-    - name: mlpipeline
-    - name: models
 
   service:
     type: ClusterIP
@@ -354,6 +359,58 @@ s3:
     enabled: false
 
 # -----------------------------------------------------------------------------
+# Admin dashboard — separate web UI on port 23646 with S3 access-key/bucket
+# management, cluster status, and topology views. Sister component to the
+# master web UI, intended as the operator-facing console.
+#
+# This component is single-replica by design (leader-elected, persistent
+# state in dataDir) — do NOT scale to 2. The blog reference confirms it as
+# the "real" admin UI; the master UI alone does not expose S3 IAM.
+# -----------------------------------------------------------------------------
+admin:
+  enabled: true
+  replicas: 1
+  port: 23646
+  grpcPort: 33646
+
+  # Credentials are read from the seaweedfs-admin-credentials Secret (declared
+  # in scripts/secrets.yaml). Auth IS required — without it the UI is open.
+  secret:
+    existingSecret: seaweedfs-admin-credentials
+    userKey: adminUser
+    pwKey: adminPassword
+
+  # Persistent state for maintenance schedules, history, etc. Without this,
+  # admin loses configuration on every pod restart.
+  dataDir: /data
+  data:
+    type: persistentVolumeClaim
+    size: 2Gi
+    storageClass: ""
+
+  logs:
+    type: emptyDir
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+  service:
+    type: ClusterIP
+
+  ingress:
+    enabled: false
+
+  # Single replica — empty affinity to skip the chart's default
+  # podAntiAffinity (which is harmless at replicas=1 but renders ugly events
+  # if the scheduler picks the wrong node).
+  affinity: ""
+
+# -----------------------------------------------------------------------------
 # Disabled subsystems
 # -----------------------------------------------------------------------------
 sftp:
@@ -363,9 +420,6 @@ cosi:
   enabled: false
 
 allInOne:
-  enabled: false
-
-admin:
   enabled: false
 
 worker:
