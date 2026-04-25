@@ -1,0 +1,369 @@
+# =============================================================================
+# SeaweedFS - Production values (replaces MinIO as the cluster-wide S3 store)
+#
+# Layout:
+#   - Master (StatefulSet, 3 replicas)         — Raft cluster for metadata
+#   - Volume (StatefulSet, 3 replicas, PVC)    — object storage tier
+#   - Filer  (StatefulSet, 2 replicas)         — POSIX-style namespace, MySQL backend
+#   - S3     (Deployment, 2 replicas)          — standalone S3 gateway, ClusterIP
+#
+# All Services are ClusterIP. The headless StatefulSet services
+# (clusterIP: None) are required by the StatefulSet contract; no LoadBalancer
+# or NodePort is created anywhere.
+#
+# Filer metadata lives in the shared MySQL release (mlrun-db.aib-data).
+# The bootstrap script in values/product/dev/mysql.yaml provisions the
+# `seaweedfs` database and `seaweedfs` user from the
+# `seaweedfs-db-credentials` Secret. The same Secret is mounted here so the
+# filer pod connects with the same password — both run in aib-data, so no
+# cross-namespace secret mirroring is needed.
+#
+# External exposure (S3 endpoint, master UI, filer UI) is handled by
+# aib-platform/mesh-networking via Istio VirtualServices — see
+# aib-platform-values.yaml. This chart's own Ingress resources stay disabled.
+# =============================================================================
+
+# Service names become seaweedfs-master, seaweedfs-volume, seaweedfs-filer,
+# seaweedfs-filer-client, seaweedfs-s3.
+fullnameOverride: seaweedfs
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: ""
+  seaweedfs:
+    createClusterRole: true
+    image:
+      repository: ""
+      name: chrislusf/seaweedfs
+    imagePullPolicy: IfNotPresent
+    loggingLevel: 1
+    # Keep cluster-internal mTLS off — Istio handles in-mesh mTLS via
+    # PeerAuthentication STRICT (see aib-platform mesh-security values).
+    enableSecurity: false
+    serviceAccountName: "seaweedfs"
+    automountServiceAccountToken: true
+    monitoring:
+      enabled: false
+    # Replicate every chunk to one other volume server (different host).
+    # "001" is the right encoding for a flat 2-volume-server topology where
+    # both pods sit in the same logical rack but on different nodes.
+    enableReplication: true
+    replicationPlacement: "001"
+    extraEnvironmentVars:
+      WEED_CLUSTER_DEFAULT: "sw"
+      WEED_CLUSTER_SW_MASTER: "{{ include \"seaweedfs.cluster.masterAddress\" . }}"
+      WEED_CLUSTER_SW_FILER: "{{ include \"seaweedfs.cluster.filerAddress\" . }}"
+
+# Pull the SeaweedFS server image from the internal Artifact Registry mirror
+# (mirrored from chrislusf/seaweedfs:4.21 by scripts/mirror-seaweedfs-images.sh).
+# The chart's seaweedfs.image helper picks these up directly and uses them
+# for master/volume/filer/s3 and the post-install bucket-creation hook.
+image:
+  registry: europe-west1-docker.pkg.dev
+  repository: vf-grp-aib-dev-mirror/aib-plus-images/seaweedfs
+  tag: "4.21"
+
+# -----------------------------------------------------------------------------
+# Master — Raft cluster, metadata only (no chunk data)
+#
+# Note on replica count: Raft requires an odd-sized quorum. 3 masters tolerate
+# losing one pod; 2 masters CANNOT — losing either pod breaks quorum and the
+# cluster goes read-only. So even though every other component is sized to 2
+# replicas, the master stays at 3 to actually deliver HA.
+# -----------------------------------------------------------------------------
+master:
+  enabled: true
+  replicas: 3
+  port: 9333
+  grpcPort: 19333
+  metricsPort: 9327
+  ipBind: "0.0.0.0"
+
+  # Each volume server caps a "logical volume" at this size before sealing it
+  # and asking the master for a new one. 30 GiB is a sensible production
+  # default; the 1 GiB upstream default fragments badly under load.
+  volumeSizeLimitMB: 30000
+
+  # Hashicorp Raft is the supported flavour for ≥3-node masters; the legacy
+  # raftBootstrap path is single-node only.
+  raftHashicorp: true
+  raftBootstrap: true
+
+  resumeState: true
+  defaultReplication: "001"
+
+  data:
+    type: "persistentVolumeClaim"
+    size: "4Gi"
+    storageClass: ""
+
+  logs:
+    type: "emptyDir"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+  # Spread the three masters across nodes — quorum survives a single-node
+  # outage only when no two masters share a host.
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "seaweedfs.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: master
+          topologyKey: kubernetes.io/hostname
+
+  ingress:
+    enabled: false
+
+  extraEnvironmentVars:
+    WEED_MASTER_VOLUME_GROWTH_COPY_1: "7"
+    WEED_MASTER_VOLUME_GROWTH_COPY_2: "6"
+    WEED_MASTER_VOLUME_GROWTH_COPY_3: "3"
+    WEED_MASTER_VOLUME_GROWTH_COPY_OTHER: "1"
+
+# -----------------------------------------------------------------------------
+# Volume servers — actual object data, one PVC per replica
+# -----------------------------------------------------------------------------
+volume:
+  enabled: true
+  # Two volume servers — minimum for the "001" replication scheme above to
+  # actually place a copy on a different host.
+  replicas: 2
+  port: 8080
+  grpcPort: 18080
+  metricsPort: 9327
+  ipBind: "0.0.0.0"
+
+  # Reject writes once any disk drops below 5% free — leaves headroom for
+  # compaction and prevents the cluster from wedging on a full volume.
+  minFreeSpacePercent: 5
+
+  dataDirs:
+    - name: data1
+      type: "persistentVolumeClaim"
+      size: "20Gi"
+      storageClass: ""
+      maxVolumes: 0
+
+  resizeHook:
+    enabled: true
+    # Mirrored from alpine/k8s:1.28.4 by scripts/mirror-seaweedfs-images.sh.
+    image: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/alpine-k8s:1.28.4
+
+  logs:
+    type: "emptyDir"
+
+  compactionMBps: "50"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "seaweedfs.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: volume
+          topologyKey: kubernetes.io/hostname
+
+  ingress:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Filer — POSIX-style namespace + S3 metadata, MySQL-backed
+# -----------------------------------------------------------------------------
+filer:
+  enabled: true
+  replicas: 2
+  port: 8888
+  grpcPort: 18888
+  metricsPort: 9327
+  ipBind: "0.0.0.0"
+
+  defaultReplicaPlacement: "001"
+  disableDirListing: false
+  dirListLimit: 100000
+
+  # We use MySQL (leveldb2 disabled), so the filer is fully stateless on disk
+  # and does not need a PVC — keep enablePVC off and use emptyDir for data.
+  enablePVC: false
+
+  data:
+    type: "emptyDir"
+
+  logs:
+    type: "emptyDir"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "seaweedfs.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: filer
+          topologyKey: kubernetes.io/hostname
+
+  ingress:
+    enabled: false
+
+  # MySQL filer store. Username and database are bootstrapped by the MySQL
+  # initdb hook (charts/mysql, see values/product/dev/mysql.yaml). The
+  # password comes in via secretExtraEnvironmentVars below.
+  extraEnvironmentVars:
+    WEED_LEVELDB2_ENABLED: "false"
+    WEED_MYSQL_ENABLED: "true"
+    WEED_MYSQL_HOSTNAME: "mlrun-db.aib-data.svc.cluster.local"
+    WEED_MYSQL_PORT: "3306"
+    WEED_MYSQL_USERNAME: "seaweedfs"
+    WEED_MYSQL_DATABASE: "seaweedfs"
+    WEED_MYSQL_CONNECTION_MAX_IDLE: "5"
+    WEED_MYSQL_CONNECTION_MAX_OPEN: "75"
+    WEED_MYSQL_CONNECTION_MAX_LIFETIME_SECONDS: "600"
+    WEED_MYSQL_INTERPOLATEPARAMS: "true"
+    WEED_FILER_OPTIONS_RECURSIVE_DELETE: "false"
+    WEED_FILER_BUCKETS_FOLDER: "/buckets"
+
+  # Pulls the MySQL password from the same Secret the MySQL bootstrap script
+  # reads from. The Secret must exist before the MySQL chart is installed
+  # (see scripts/product_install.sh) so the user/database get provisioned
+  # with the matching password.
+  #
+  #   kubectl create secret generic seaweedfs-db-credentials \
+  #     --from-literal=mariadb-password=<strong-password> \
+  #     --namespace aib-data
+  #
+  # MySQL and SeaweedFS both run in aib-data, so the Secret is read in-place
+  # with no cross-namespace mirror.
+  secretExtraEnvironmentVars:
+    WEED_MYSQL_PASSWORD:
+      secretKeyRef:
+        name: seaweedfs-db-credentials
+        key: mariadb-password
+
+  # Embedded S3 in the filer is disabled — we use the standalone s3 deployment
+  # below so we can scale the gateway independently and apply a clean
+  # ClusterIP Service.
+  s3:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# S3 gateway — the endpoint MLRun, Nuclio and pipelines talk to
+# -----------------------------------------------------------------------------
+s3:
+  enabled: true
+  replicas: 2
+  bindAddress: 0.0.0.0
+  port: 8333
+  httpsPort: 0
+  metricsPort: 9327
+
+  # Auth on. The chart auto-generates an admin and a read-only key pair on
+  # first install and stores them in the `seaweedfs-s3-secret` Secret in this
+  # namespace; they are preserved across upgrades via the
+  # helm.sh/resource-policy: keep annotation on the Secret.
+  #
+  # To explicitly pin the keys instead of letting them auto-generate, set:
+  #   credentials:
+  #     admin: { accessKey: "...", secretKey: "..." }
+  #     read:  { accessKey: "...", secretKey: "..." }
+  enableAuth: true
+
+  # Pre-create the buckets MLRun, Nuclio and pipelines expect. The names
+  # match the global.infrastructure.aws.bucketName / pipelines defaults.
+  createBuckets:
+    - name: mlrun
+    - name: mlpipeline
+    - name: models
+
+  service:
+    type: ClusterIP
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+  # Spread the two S3 gateways across nodes so the Service still has an
+  # endpoint when a node goes down.
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "seaweedfs.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: s3
+          topologyKey: kubernetes.io/hostname
+
+  logs:
+    type: "emptyDir"
+
+  livenessProbe:
+    enabled: true
+    httpGet:
+      path: /status
+      scheme: HTTP
+    initialDelaySeconds: 20
+    periodSeconds: 60
+    successThreshold: 1
+    failureThreshold: 20
+    timeoutSeconds: 10
+
+  readinessProbe:
+    enabled: true
+    httpGet:
+      path: /status
+      scheme: HTTP
+    initialDelaySeconds: 15
+    periodSeconds: 15
+    successThreshold: 1
+    failureThreshold: 100
+    timeoutSeconds: 10
+
+  ingress:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Disabled subsystems
+# -----------------------------------------------------------------------------
+sftp:
+  enabled: false
+
+cosi:
+  enabled: false
+
+allInOne:
+  enabled: false
+
+admin:
+  enabled: false
+
+worker:
+  enabled: false

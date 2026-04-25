@@ -94,10 +94,39 @@ mesh-networking:
           tls:
             mode: ISTIO_MUTUAL
 
-      - name: minio-console
-        subdomain: minio
+      # ---------------------------------------------------------------------
+      # SeaweedFS — S3 API, master web UI, filer web UI
+      #
+      # The same Gateway listens on plain HTTP at *.dev.plus.aib.vodafone.com,
+      # so all three subdomains resolve through it. mTLS toward the upstream
+      # pods is enforced by mesh-security PeerAuthentication STRICT on
+      # aib-data; setting trafficPolicy.tls.mode: ISTIO_MUTUAL on the
+      # DestinationRule avoids client/server mode mismatch.
+      # ---------------------------------------------------------------------
+      - name: seaweedfs-s3
+        subdomain: s3
         serviceNamespace: aib-data
-        port: 9001
+        port: 8333
+        timeout: 600s
+        retries:
+          attempts: 3
+          perTryTimeout: 120s
+        trafficPolicy:
+          tls:
+            mode: ISTIO_MUTUAL
+
+      # - name: seaweedfs-master
+      #   subdomain: seaweedfs
+      #   serviceNamespace: aib-data
+      #   port: 9333
+      #   trafficPolicy:
+      #     tls:
+      #       mode: ISTIO_MUTUAL
+
+      - name: seaweedfs-filer
+        subdomain: seaweedfs-filer
+        serviceNamespace: aib-data
+        port: 8888
         trafficPolicy:
           tls:
             mode: ISTIO_MUTUAL

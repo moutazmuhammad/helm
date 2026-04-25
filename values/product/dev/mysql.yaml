@@ -103,6 +103,8 @@ initdbScripts:
 
 
 primary:
+  # Bitnami's "replication" architecture is single-writer — only one primary
+  # is permitted; secondaries provide read HA via async replication.
   replicaCount: 1
 
   podAnnotations:
@@ -123,7 +125,7 @@ primary:
   pdb:
     create: true
     maxUnavailable: 0
-    
+
   persistence:
     enabled: true
     size: 5Gi
@@ -132,11 +134,11 @@ primary:
 
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: 100m
+      memory: 256Mi
     limits:
-      cpu: "1"
-      memory: 1Gi
+      cpu: 500m
+      memory: 512Mi
 
   service:
     type: ClusterIP
@@ -146,7 +148,10 @@ primary:
   podAntiAffinityPreset: hard
 
 secondary:
-  replicaCount: 1
+  # Two replicas behind the read service for read HA. Each gets its own PVC
+  # via the StatefulSet — losing one node still leaves the cluster writable
+  # (primary) and readable (one secondary).
+  replicaCount: 2
   podManagementPolicy: Parallel
 
   podAnnotations:
@@ -162,14 +167,14 @@ secondary:
     size: 5Gi
     accessModes:
       - ReadWriteOnce
-  
+
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
+      cpu: 100m
+      memory: 256Mi
     limits:
-      cpu: "1"
-      memory: 1Gi
+      cpu: 500m
+      memory: 512Mi
 
   # Spread secondaries across nodes.
   podAntiAffinityPreset: hard

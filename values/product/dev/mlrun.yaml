@@ -26,7 +26,10 @@ nuclio:
   controller:
     namespace: ""
     enabled: true
-    # Leader-elected — keep at 1. Scaling beyond 1 does not add HA.
+    # Leader-elected — only one replica is active at a time. Keep at 1
+    # because a second pod would idle as a hot standby that adds no
+    # throughput, and the controller restart surface is small enough that
+    # scheduling preserves availability.
     replicas: 1
 
     image:
@@ -36,18 +39,18 @@ nuclio:
 
     resources:
       requests:
-        cpu: 100m
-        memory: 128Mi
+        cpu: 50m
+        memory: 64Mi
       limits:
-        cpu: 500m
-        memory: 256Mi
+        cpu: 200m
+        memory: 128Mi
 
   dashboard:
     enabled: true
     # 2 replicas for HA in dev. PDB ships via scripts/pdbs.yaml.
-    replicas: 1
+    replicas: 2
     service:
-      type: ClusterIP 
+      type: ClusterIP
     containerBuilderKind: kaniko
 
     image:
@@ -79,12 +82,22 @@ nuclio:
 
     resources:
       requests:
-        cpu: 100m
-        memory: 128Mi
+        cpu: 50m
+        memory: 64Mi
       limits:
-        cpu: 500m
-        memory: 512Mi
-    
+        cpu: 250m
+        memory: 256Mi
+
+    # Spread the two dashboard replicas across nodes — single-node failure
+    # then drops at most one replica.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                nuclio.io/app: dashboard
+            topologyKey: kubernetes.io/hostname
+
     rbac:
       create: true
       crdAccessMode: cluster
@@ -127,18 +140,30 @@ mlrun:
       cpu: "25m"
       memory: "1Mi"
 
-  # Options: "filesystem" (uses S3/MinIO via S3 protocol), "s3" (direct AWS S3)
+  # Options: "filesystem" (uses S3/SeaweedFS via S3 protocol), "s3" (direct AWS S3)
+  # Stay on filesystem — only this mode honours S3_ENDPOINT_URL, which is
+  # required to reach SeaweedFS instead of native AWS S3.
   storage: filesystem
   storageAutoMountParams: ~
 
-  # Credentials come from the "minio-credentials" Kubernetes Secret
-  secrets:
-    s3:
-      accessKey: ""
-      secretKey: ""
+  # S3 credentials reach the API and function pods through the
+  # `minio-credentials` Kubernetes Secret (see api.envFrom below). The
+  # legacy `secrets.s3.accessKey/secretKey` knobs only apply when
+  # `storage: s3`, so they are intentionally omitted here.
+  #
+  # After the SeaweedFS chart installs, mint the Secret in aib-system:
+  #
+  #   ADMIN_KEY=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
+  #     -o jsonpath='{.data.admin_access_key_id}' | base64 -d)
+  #   ADMIN_SECRET=$(kubectl get secret seaweedfs-s3-secret -n aib-data \
+  #     -o jsonpath='{.data.admin_secret_access_key}' | base64 -d)
   #   kubectl create secret generic minio-credentials \
-  #     --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
-  #     --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
+  #     --from-literal=AWS_ACCESS_KEY_ID=$ADMIN_KEY \
+  #     --from-literal=AWS_SECRET_ACCESS_KEY=$ADMIN_SECRET \
+  #     --namespace aib-system
+  #   kubectl create secret generic mlpipeline-minio-artifact \
+  #     --from-literal=accesskey=$ADMIN_KEY \
+  #     --from-literal=secretkey=$ADMIN_SECRET \
   #     --namespace aib-system
 
   # MLRun's Nuclio integration mode.
@@ -166,9 +191,12 @@ mlrun:
     # Leader (writes state). Keep at 1; MLRun's HTTPDB is single-writer.
     chief:
       minReplicas: 1
-    
+
+    # Workers serve read APIs and run async jobs — safe to scale horizontally.
+    # Keeps two warm pods so a single pod restart does not break /api reads.
     worker:
-      minReplicas: 0
+      minReplicas: 2
+      maxReplicas: 4
 
     image:
       repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mlrun-api
@@ -186,29 +214,32 @@ mlrun:
 
     resources:
       requests:
-        cpu: 250m
-        memory: 512Mi
+        cpu: 100m
+        memory: 256Mi
       limits:
-        cpu: "2"
-        memory: 2Gi
-    
-    # PVC used by MLRun API for local file storage (logs, temp files).
+        cpu: 750m
+        memory: 768Mi
+
+    # Per-pod scratch dir at httpDB.dirPath (/mlrun/db). Held only:
+    #   - the legacy SQLite DB (unused — DSN is MySQL)
+    #   - the logCollector sidecar's per-pod workDir cache
+    # Both are pod-local by nature, so a shared RWO PVC would deadlock the
+    # second of (chief + 2 workers + model-server) on a different node.
+    # emptyDir gives each replica its own writable mount with no contention.
+    #
+    # The umbrella mlrun-ce/values.yaml defaults to a persistentVolumeClaim
+    # override; null it explicitly so Helm's deep merge doesn't render both
+    # volume sources on the same volume.
     volumes:
       storageOverride:
-        persistentVolumeClaim:
-          claimName: mlrun-api-pvc
+        emptyDir: {}
+        persistentVolumeClaim: null
 
-    # Enable persistent storage for the MLRun API.
-    # When false, data is lost on pod restart.
+    # No shared PVC — each pod has its own emptyDir above. Persistent state
+    # lives in MySQL (metadata) and SeaweedFS S3 (artifacts), so losing the
+    # local scratch on pod restart is harmless.
     persistence:
-      enabled: true
-      # Use a pre-existing PVC instead of creating one. Leave empty to auto-create.
-      existingClaim:
-      storageClass:
-      accessMode: "ReadWriteOnce"
-      size: "8Gi"
-      # annotations:
-      #   helm.sh/resource-policy: "keep"
+      enabled: false
     
     envFrom:
       - configMapRef:
@@ -226,9 +257,13 @@ mlrun:
           name: minio-credentials
 
     extraEnvKeyValue:
-      S3_ENDPOINT_URL: "http://minio.aib-data.svc.cluster.local:9000"
-      AWS_ENDPOINT_URL_S3: "http://minio.aib-data.svc.cluster.local:9000"
-      AWS_S3_ENDPOINT_URL: "http://minio.aib-data.svc.cluster.local:9000"
+      S3_ENDPOINT_URL: "http://seaweedfs-s3.aib-data.svc.cluster.local:8333"
+      AWS_ENDPOINT_URL_S3: "http://seaweedfs-s3.aib-data.svc.cluster.local:8333"
+      AWS_S3_ENDPOINT_URL: "http://seaweedfs-s3.aib-data.svc.cluster.local:8333"
+      # SeaweedFS S3 only supports path-style addressing; force boto/aioboto
+      # away from virtual-hosted-style requests.
+      S3_ADDRESSING_STYLE: "path"
+      S3_VERIFY_SSL: "false"
       # -----------------------------------------------------------------------
       # MLRun Function Hub (marketplace)
       # -----------------------------------------------------------------------
@@ -257,7 +292,7 @@ mlrun:
   ui:
     fullnameOverride: mlrun-ui
     # 2 replicas for HA in dev. PDB ships via scripts/pdbs.yaml.
-    replicaCount: 1
+    replicaCount: 2
 
     image:
       repository: europe-west1-docker.pkg.dev/vf-grp-aib-dev-mirror/aib-plus-images/mlrun-ui
@@ -282,11 +317,11 @@ mlrun:
     # Resource limits for the MLRun UI pod.
     resources:
       requests:
-        cpu: 100m
-        memory: 128Mi
+        cpu: 25m
+        memory: 32Mi
       limits:
-        cpu: 500m
-        memory: 256Mi
+        cpu: 100m
+        memory: 96Mi
 
   db:
     enabled: false
@@ -300,11 +335,11 @@ mlrun:
     dbType: mysql
     dirPath: "/mlrun/db"
 
-    # Points to the external mlrun-db service (bitnami mysql release).
-    # The password must match the mysql-credentials secret and is supplied at
-    # install time, e.g.:
-    #   --set-string mlrun.httpDB.dsn="mysql+pymysql://root:<password>@mlrun-db:3306/mlrun"
-    dsn: mysql+pymysql://root@mlrun-db:3306/mlrun
+    # Points to the external mlrun-db service (bitnami mysql release) running
+    # in the aib-data namespace. The password must match the mysql-credentials
+    # secret and is supplied at install time, e.g.:
+    #   --set-string mlrun.httpDB.dsn="mysql+pymysql://root:<password>@mlrun-db.aib-data.svc.cluster.local:3306/mlrun"
+    dsn: mysql+pymysql://root@mlrun-db.aib-data.svc.cluster.local:3306/mlrun
     oldDsn: sqlite:////mlrun/db/mlrun.db?check_same_thread=false
 
   modelMonitoring:
@@ -326,53 +361,35 @@ jupyterNotebook:
 
 
 # =============================================================================
-# S3-Compatible Object Store (MinIO subchart DISABLED)
+# S3-Compatible Object Store — SeaweedFS (MinIO replaced)
 #
-# This chart does NOT create a MinIO instance. All components are configured
-# to use a pre-existing S3-compatible store in the aib-data namespace.
-# Compatible backends include:
-#   - MinIO (deployed via a separate Helm release)
-#   - An existing AI Store / object store installed in aib-data
-#   - Any other S3-compatible store reachable via cross-namespace DNS
+# This chart does NOT create a MinIO instance. All components route to the
+# SeaweedFS S3 gateway installed in aib-data via a separate helm release
+# (see values/product/dev/seaweedfs.yaml).
 #
-# Requirements for the external object store:
-#   - Accessible at <externalHost>:<service.port> from aib-system
-#   - Supports the S3 protocol (PUT/GET/LIST/DELETE)
-#   - Has a bucket named "mlrun" (or matching global.infrastructure.aws.bucketName)
-#   - Credentials available as a Kubernetes Secret in aib-system (see below)
+# The "minio" key here is the integration surface mlrun-ce exposes; only the
+# value of `externalHost` and `service.port` are read by the helper templates
+# (_helpers.tpl: mlrun-ce.minio.service.host / .url). Renaming the key would
+# require patching the upstream chart.
 #
-# SECRETS: Object store credentials are NOT stored in values.yaml.
-# Create them as Kubernetes Secrets before deploying:
-#
-#   kubectl create secret generic minio-credentials \
-#     --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
-#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
-#     --namespace aib-system
-#
-#   kubectl create secret generic mlpipeline-minio-artifact \
-#     --from-literal=accesskey=<access-key> \
-#     --from-literal=secretkey=<secret-key> \
-#     --namespace aib-system
-#
-# Both are referenced by the chart via existingSecret (no credentials rendered
-# into the chart from values.yaml).
+# SECRETS: Object store credentials are NOT stored in values.yaml. They are
+# minted by the SeaweedFS chart and copied into aib-system before MLRun
+# starts — see the mlrun.secrets block above for the exact commands.
 # =============================================================================
 minio:
   enabled: false
 
-  # Cross-namespace DNS endpoint for the external object store in aib-data.
-  # Change: Used by _helpers.tpl to resolve the S3 endpoint for MLRun, Jupyter,
-  # Pipelines, and Argo. Supports any S3-compatible store (MinIO, AI Store, etc).
-  externalHost: minio.aib-data.svc.cluster.local
+  # Cross-namespace DNS endpoint for the SeaweedFS S3 gateway in aib-data.
+  # Used by _helpers.tpl to resolve the S3 endpoint for MLRun, Jupyter,
+  # Pipelines, and Argo.
+  externalHost: seaweedfs-s3.aib-data.svc.cluster.local
+
+  # Credentials live in this Secret; do NOT add inline rootUser/rootPassword
+  # — they would override the Secret and put plaintext keys into values.yaml.
   existingSecret: "minio-credentials"
 
-  # Unused when existingSecret is set. 
-  credentialsSecretName: ""
-  rootUser: ""
-  rootPassword: ""
-
   service:
-    port: 9000
+    port: 8333
 
 
 # =============================================================================
